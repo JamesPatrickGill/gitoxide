@@ -2,6 +2,10 @@ use bstr::{BString, ByteSlice};
 
 use crate::{Protocol, Service};
 
+///
+#[cfg(feature = "blocking-server")]
+pub mod blocking_io;
+
 /// The request parsed from a client's initial connect message.
 ///
 /// Parsed from the `git-proto-request` format described in the

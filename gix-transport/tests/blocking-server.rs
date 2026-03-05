@@ -1,4 +1,16 @@
-use gix_transport::{server, Protocol, Service};
+use std::io::Write;
+
+use gix_transport::{packetline::blocking_io::Writer, server, Protocol, Service};
+
+/// Helper: write a connect message as a packetline, the way a real git client does.
+fn write_connect_message(message: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut writer = Writer::new(&mut buf);
+    writer.enable_binary_mode();
+    writer.write_all(message).expect("write to vec cannot fail");
+    writer.flush().expect("flush to vec cannot fail");
+    buf
+}
 
 #[test]
 fn version_1_without_host_and_version() {
@@ -101,4 +113,55 @@ fn with_strange_host_and_port() {
     );
     assert_eq!(request.desired_protocol, Protocol::V1);
     assert!(request.extra_parameters.is_empty());
+}
+
+// --- daemon::accept tests ---
+// These simulate a real client writing the connect message as a packetline,
+// then verify the server's daemon::accept() reads and parses it correctly.
+
+#[test]
+fn daemon_accept_v1_with_host() {
+    let client_bytes =
+        write_connect_message(b"git-upload-pack /repo.git\0host=myhost\0");
+
+    let (connection, request) =
+        server::blocking_io::daemon::accept(&client_bytes[..], Vec::new(), false)
+            .expect("valid connection");
+
+    assert_eq!(connection.service, Service::UploadPack);
+    assert_eq!(connection.repository_path, "/repo.git");
+    assert_eq!(connection.protocol, Protocol::V1);
+    assert_eq!(request.virtual_host, Some(("myhost".to_owned(), None)));
+    assert!(request.extra_parameters.is_empty());
+}
+
+#[test]
+fn daemon_accept_v2_with_host_and_port() {
+    let client_bytes =
+        write_connect_message(b"git-upload-pack /repo.git\0host=myhost:9418\0\0version=2\0");
+
+    let (connection, request) =
+        server::blocking_io::daemon::accept(&client_bytes[..], Vec::new(), false)
+            .expect("valid connection");
+
+    assert_eq!(connection.service, Service::UploadPack);
+    assert_eq!(connection.repository_path, "/repo.git");
+    assert_eq!(connection.protocol, Protocol::V2);
+    assert_eq!(
+        request.virtual_host,
+        Some(("myhost".to_owned(), Some(9418)))
+    );
+}
+
+#[test]
+fn daemon_accept_receive_pack() {
+    let client_bytes =
+        write_connect_message(b"git-receive-pack /repo.git\0host=myhost\0");
+
+    let (connection, _request) =
+        server::blocking_io::daemon::accept(&client_bytes[..], Vec::new(), false)
+            .expect("valid connection");
+
+    assert_eq!(connection.service, Service::ReceivePack);
+    assert_eq!(connection.repository_path, "/repo.git");
 }
