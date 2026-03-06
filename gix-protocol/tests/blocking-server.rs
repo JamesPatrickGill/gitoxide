@@ -1,6 +1,8 @@
 use gix_hash::ObjectId;
+use gix_packetline::blocking_io::encode::{data_to_write, flush_to_write};
 use gix_packetline::blocking_io::StreamingPeekableIter;
 use gix_packetline::PacketLineRef;
+use gix_protocol::serve::upload_pack::want_haves::{parse_haves, parse_wants};
 use gix_protocol::serve::{write_capabilities_v2, write_v1, write_v2_ls_refs, RefAdvertisement};
 
 fn read_data_line(reader: &mut StreamingPeekableIter<&[u8]>) -> Vec<u8> {
@@ -299,4 +301,102 @@ fn v2_capabilities_with_values() {
     assert_eq!(line, b"server-option\n");
 
     assert_flushed(&mut reader);
+}
+
+// --- want/have parsing tests ---
+
+fn write_want_have_input(lines: &[&str]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for line in lines {
+        data_to_write(format!("{line}\n").as_bytes(), &mut buf).unwrap();
+    }
+    flush_to_write(&mut buf).unwrap();
+    buf
+}
+
+#[test]
+fn parse_wants_single_no_caps() {
+    let oid = hex_id(0xaa);
+    let input = write_want_have_input(&[&format!("want {}", oid.to_hex())]);
+    let mut reader = StreamingPeekableIter::new(&input[..], &[PacketLineRef::Flush], false);
+
+    let result = parse_wants(&mut reader).unwrap();
+    assert_eq!(result.wants.len(), 1);
+    assert_eq!(result.wants[0].id, oid);
+    assert!(result.capabilities.is_empty());
+}
+
+#[test]
+fn parse_wants_first_line_has_capabilities() {
+    let oid1 = hex_id(0xaa);
+    let oid2 = hex_id(0xbb);
+    let input = write_want_have_input(&[
+        &format!("want {} ofs-delta side-band-64k", oid1.to_hex()),
+        &format!("want {}", oid2.to_hex()),
+    ]);
+    let mut reader = StreamingPeekableIter::new(&input[..], &[PacketLineRef::Flush], false);
+
+    let result = parse_wants(&mut reader).unwrap();
+    assert_eq!(result.wants.len(), 2);
+    assert_eq!(result.wants[0].id, oid1);
+    assert_eq!(result.wants[1].id, oid2);
+    assert_eq!(result.capabilities, vec!["ofs-delta", "side-band-64k"]);
+}
+
+#[test]
+fn parse_wants_ignores_caps_on_subsequent_lines() {
+    let oid1 = hex_id(0xaa);
+    let oid2 = hex_id(0xbb);
+    let input = write_want_have_input(&[
+        &format!("want {} cap1", oid1.to_hex()),
+        &format!("want {} cap2", oid2.to_hex()),
+    ]);
+    let mut reader = StreamingPeekableIter::new(&input[..], &[PacketLineRef::Flush], false);
+
+    let result = parse_wants(&mut reader).unwrap();
+    assert_eq!(result.wants.len(), 2);
+    assert_eq!(result.capabilities, vec!["cap1"]);
+}
+
+#[test]
+fn parse_haves_with_done() {
+    let oid1 = hex_id(0xaa);
+    let oid2 = hex_id(0xbb);
+    let mut input = Vec::new();
+    data_to_write(format!("have {}\n", oid1.to_hex()).as_bytes(), &mut input).unwrap();
+    data_to_write(format!("have {}\n", oid2.to_hex()).as_bytes(), &mut input).unwrap();
+    data_to_write(b"done\n", &mut input).unwrap();
+    flush_to_write(&mut input).unwrap();
+
+    let mut reader = StreamingPeekableIter::new(&input[..], &[PacketLineRef::Flush], false);
+
+    let result = parse_haves(&mut reader).unwrap();
+    assert_eq!(result.haves.len(), 2);
+    assert_eq!(result.haves[0], oid1);
+    assert_eq!(result.haves[1], oid2);
+    assert!(result.done);
+}
+
+#[test]
+fn parse_haves_without_done_ends_at_flush() {
+    let oid = hex_id(0xaa);
+    let input = write_want_have_input(&[&format!("have {}", oid.to_hex())]);
+    let mut reader = StreamingPeekableIter::new(&input[..], &[PacketLineRef::Flush], false);
+
+    let result = parse_haves(&mut reader).unwrap();
+    assert_eq!(result.haves.len(), 1);
+    assert_eq!(result.haves[0], oid);
+    assert!(!result.done);
+}
+
+#[test]
+fn parse_haves_empty_round() {
+    let mut input = Vec::new();
+    flush_to_write(&mut input).unwrap();
+
+    let mut reader = StreamingPeekableIter::new(&input[..], &[PacketLineRef::Flush], false);
+
+    let result = parse_haves(&mut reader).unwrap();
+    assert!(result.haves.is_empty());
+    assert!(!result.done);
 }
