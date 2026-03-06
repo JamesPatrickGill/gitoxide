@@ -1,6 +1,9 @@
 mod ref_advertisement;
 pub use ref_advertisement::{write_capabilities_v2, write_v1, write_v2_ls_refs};
 
+///
+pub mod upload_pack;
+
 /// A reference to advertise to clients.
 pub struct RefAdvertisement<'a> {
     /// The ref name, e.g. `refs/heads/main`.
