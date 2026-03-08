@@ -2,6 +2,8 @@
 #![deny(missing_docs, rust_2018_idioms, unsafe_code)]
 
 ///
+pub mod pack;
+///
 pub mod refs;
 
 use bstr::BString;
