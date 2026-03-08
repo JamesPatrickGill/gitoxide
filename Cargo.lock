@@ -2331,7 +2331,11 @@ name = "gix-serve"
 version = "0.1.0"
 dependencies = [
  "bstr",
+ "gix-features",
  "gix-hash",
+ "gix-object",
+ "gix-odb",
+ "gix-pack",
  "gix-ref",
  "gix-testtools",
  "thiserror 2.0.18",
