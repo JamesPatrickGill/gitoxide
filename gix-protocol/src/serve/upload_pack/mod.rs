@@ -8,7 +8,7 @@ pub use ack::{write_ack, write_nak, AckStatus};
 
 ///
 pub mod function;
-pub use function::serve_upload_pack_v1;
+pub use function::{serve_upload_pack_v1, serve_upload_pack_v2};
 
 /// Errors from serving upload-pack.
 #[derive(Debug, thiserror::Error)]
@@ -18,4 +18,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("Failed to parse client wants/haves")]
     WantHaves(#[from] want_haves::Error),
+    #[error("Packetline decode error")]
+    PacketlineDecode(#[from] crate::transport::packetline::decode::Error),
+    #[error("Unexpected line: {line}")]
+    UnexpectedLine { line: bstr::BString },
 }

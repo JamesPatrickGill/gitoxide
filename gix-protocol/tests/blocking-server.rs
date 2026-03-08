@@ -1,13 +1,13 @@
 use gix_hash::ObjectId;
-use gix_packetline::blocking_io::encode::{data_to_write, flush_to_write};
+use gix_packetline::blocking_io::encode::{data_to_write, delim_to_write, flush_to_write};
 use gix_packetline::blocking_io::StreamingPeekableIter;
 use gix_packetline::PacketLineRef;
 use gix_protocol::serve::upload_pack::ack::{write_ack, write_nak, AckStatus};
-use gix_protocol::serve::upload_pack::serve_upload_pack_v1;
 use gix_protocol::serve::upload_pack::want_haves::{parse_haves, parse_wants};
+use gix_protocol::serve::upload_pack::{serve_upload_pack_v1, serve_upload_pack_v2};
+use gix_protocol::serve::{write_capabilities_v2, write_v1, write_v2_ls_refs, RefAdvertisement};
 use gix_transport::server::blocking_io::connection::Connection;
 use gix_transport::{Protocol, Service};
-use gix_protocol::serve::{write_capabilities_v2, write_v1, write_v2_ls_refs, RefAdvertisement};
 
 fn read_data_line(reader: &mut StreamingPeekableIter<&[u8]>) -> Vec<u8> {
     match reader.read_line().unwrap().unwrap().unwrap() {
@@ -661,14 +661,171 @@ fn upload_pack_v1_multi_round_negotiation() {
     assert_eq!(line, b"NAK\n");
     // round 2: ACK common
     let line = read_data_line(&mut reader);
-    assert_eq!(
-        line,
-        format!("ACK {} common\n", have2.to_hex()).as_bytes()
-    );
+    assert_eq!(line, format!("ACK {} common\n", have2.to_hex()).as_bytes());
     // final ACK
     let line = read_data_line(&mut reader);
-    assert_eq!(
-        line,
-        format!("ACK {}\n", have2.to_hex()).as_bytes()
+    assert_eq!(line, format!("ACK {}\n", have2.to_hex()).as_bytes());
+}
+
+// --- V2 upload-pack orchestrator tests ---
+
+/// Build V2 fetch command input: command=fetch + 0001 + wants + haves + done + 0000.
+fn build_v2_fetch_input(wants: &[ObjectId], haves: &[ObjectId], done: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    data_to_write(b"command=fetch\n", &mut buf).unwrap();
+    delim_to_write(&mut buf).unwrap();
+    for oid in wants {
+        data_to_write(format!("want {}\n", oid.to_hex()).as_bytes(), &mut buf).unwrap();
+    }
+    for oid in haves {
+        data_to_write(format!("have {}\n", oid.to_hex()).as_bytes(), &mut buf).unwrap();
+    }
+    if done {
+        data_to_write(b"done\n", &mut buf).unwrap();
+    }
+    flush_to_write(&mut buf).unwrap();
+    buf
+}
+
+/// Build V2 ls-refs command input: command=ls-refs + flush.
+fn build_v2_ls_refs_input() -> Vec<u8> {
+    let mut buf = Vec::new();
+    data_to_write(b"command=ls-refs\n", &mut buf).unwrap();
+    flush_to_write(&mut buf).unwrap();
+    buf
+}
+
+#[test]
+fn upload_pack_v2_ls_refs_command() {
+    let ref_oid = hex_id(0xaa);
+    let input = build_v2_ls_refs_input();
+    let mut output = Vec::new();
+
+    let mut conn = Connection::new(
+        &input[..],
+        &mut output,
+        Service::UploadPack,
+        "/repo.git",
+        Protocol::V2,
+        false,
     );
+
+    let refs = [RefAdvertisement {
+        name: b"refs/heads/main",
+        object_id: &ref_oid,
+        peeled: None,
+        symref_target: None,
+    }];
+    serve_upload_pack_v2(
+        &mut conn,
+        &refs,
+        |_| false,
+        |_, _, _| panic!("should not generate pack for ls-refs"),
+        &[("ls-refs", None), ("fetch", None)],
+    )
+    .unwrap();
+
+    // Output: capabilities + ls-refs response
+    let mut reader = StreamingPeekableIter::new(&output[..], &[PacketLineRef::Flush], false);
+    // capabilities
+    let line = read_data_line(&mut reader);
+    assert_eq!(line, b"version 2\n");
+    let line = read_data_line(&mut reader);
+    assert_eq!(line, b"ls-refs\n");
+    let line = read_data_line(&mut reader);
+    assert_eq!(line, b"fetch\n");
+    assert_flushed(&mut reader);
+    reader.reset();
+    // ls-refs response
+    let line = read_data_line(&mut reader);
+    assert_eq!(line, format!("{} refs/heads/main\n", ref_oid.to_hex()).as_bytes());
+    assert_flushed(&mut reader);
+}
+
+#[test]
+fn upload_pack_v2_fresh_clone() {
+    let ref_oid = hex_id(0xaa);
+    let input = build_v2_fetch_input(&[ref_oid], &[], true);
+    let mut output = Vec::new();
+
+    let mut conn = Connection::new(
+        &input[..],
+        &mut output,
+        Service::UploadPack,
+        "/repo.git",
+        Protocol::V2,
+        false,
+    );
+
+    let refs = [RefAdvertisement {
+        name: b"refs/heads/main",
+        object_id: &ref_oid,
+        peeled: None,
+        symref_target: None,
+    }];
+    let mut pack_written = false;
+    serve_upload_pack_v2(
+        &mut conn,
+        &refs,
+        |_| false,
+        |wants, common, _writer| {
+            assert_eq!(wants, &[ref_oid]);
+            assert!(common.is_empty());
+            pack_written = true;
+            Ok(())
+        },
+        &[("ls-refs", None), ("fetch", None)],
+    )
+    .unwrap();
+
+    assert!(pack_written);
+}
+
+#[test]
+fn upload_pack_v2_fetch_with_common_objects() {
+    let ref_oid = hex_id(0xaa);
+    let common_oid = hex_id(0xbb);
+    let input = build_v2_fetch_input(&[ref_oid], &[common_oid], true);
+    let mut output = Vec::new();
+
+    let mut conn = Connection::new(
+        &input[..],
+        &mut output,
+        Service::UploadPack,
+        "/repo.git",
+        Protocol::V2,
+        false,
+    );
+
+    let refs = [RefAdvertisement {
+        name: b"refs/heads/main",
+        object_id: &ref_oid,
+        peeled: None,
+        symref_target: None,
+    }];
+    serve_upload_pack_v2(
+        &mut conn,
+        &refs,
+        |oid| oid == common_oid,
+        |wants, common, _writer| {
+            assert_eq!(wants, &[ref_oid]);
+            assert_eq!(common, &[common_oid]);
+            Ok(())
+        },
+        &[("ls-refs", None), ("fetch", None)],
+    )
+    .unwrap();
+
+    // Verify output contains acknowledgments section with ACK
+    let mut reader = StreamingPeekableIter::new(&output[..], &[PacketLineRef::Flush], false);
+    // skip capabilities
+    while reader.read_line().is_some() {}
+    reader.reset();
+    // acknowledgments section
+    let line = read_data_line(&mut reader);
+    assert_eq!(line, b"acknowledgments\n");
+    let line = read_data_line(&mut reader);
+    assert_eq!(line, format!("ACK {} common\n", common_oid.to_hex()).as_bytes());
+    let line = read_data_line(&mut reader);
+    assert_eq!(line, b"ready\n");
 }
