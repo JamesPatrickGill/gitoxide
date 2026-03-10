@@ -2336,8 +2336,11 @@ dependencies = [
  "gix-object",
  "gix-odb",
  "gix-pack",
+ "gix-packetline",
+ "gix-protocol",
  "gix-ref",
  "gix-testtools",
+ "gix-transport",
  "thiserror 2.0.18",
 ]
 
