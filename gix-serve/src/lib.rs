@@ -5,6 +5,9 @@
 pub mod pack;
 ///
 pub mod refs;
+///
+#[cfg(feature = "blocking-server")]
+pub mod serve;
 
 use bstr::BString;
 use gix_hash::ObjectId;
